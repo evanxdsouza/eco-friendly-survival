@@ -125,15 +125,22 @@ export function buildUI(container, handlers) {
 
   container.appendChild(globals);
 
+  let lastFloodValue = '0';
+
   return {
     setQualityActive(q) {
       qualityBtns.querySelectorAll('button').forEach((b) => {
         b.classList.toggle('active', b.dataset.quality === q);
       });
     },
+    // Called every frame, so it must do nothing on the frames where the flood
+    // level has not moved — which is almost all of them.
     syncFloodSlider(value01) {
+      const next = String(Math.round(value01 * 100));
+      if (next === lastFloodValue) return;
+      lastFloodValue = next;
       if (refs.floodSlider && document.activeElement !== refs.floodSlider) {
-        refs.floodSlider.value = String(Math.round(value01 * 100));
+        refs.floodSlider.value = next;
       }
     },
     setActiveBuilding(key) {

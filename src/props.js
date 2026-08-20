@@ -340,7 +340,11 @@ export function createGrassField(sampler, count, quality = 'high') {
 
   const tuft = builder.build('grass-tuft').children[0];
   const inst = new THREE.InstancedMesh(tuft.geometry, tuft.material, count);
-  inst.castShadow = quality === 'high';
+  // Grass does not cast. 16,000 tufts is ~290k triangles pushed through the
+  // 4096² shadow map every frame, to produce 30cm shadows that are entirely
+  // hidden under the blades that cast them. It still RECEIVES shadow, which is
+  // the part you actually see.
+  inst.castShadow = false;
   inst.receiveShadow = true;
   inst.frustumCulled = false;
 
@@ -443,8 +447,13 @@ export function createStreetLamp({ height = 4.4 }) {
   lens.position.set(head.x + 0.16, head.y - 0.075, 0);
   group.add(lens);
 
+  // Starts hidden. A PointLight that is `visible` contributes to every lit
+  // material's shader (NUM_POINT_LIGHTS) and costs a per-fragment evaluation
+  // across the whole screen even at intensity 0 — and by day all twelve of
+  // these are at intensity 0. setNight() switches them on after dark.
   const light = new THREE.PointLight(0xffca82, 0, 13, 2);
   light.position.set(head.x + 0.16, head.y - 0.12, 0);
+  light.visible = false;
   group.add(light);
 
   group.userData.setNight = (night) => {

@@ -168,22 +168,30 @@ export function createWindowWall({
 
   group.add(b.build('window-frame'));
 
-  // Glass panes sit slightly behind the frame line (a real reveal), and are
-  // separate meshes so they can be transparent-sorted.
+  // Glass panes sit slightly behind the frame line (a real reveal). They share
+  // one material and one plane, so they merge into a single mesh — a 60-pane
+  // curtain wall is 1 draw call rather than 60. They are coplanar and never
+  // overlap each other, so nothing is lost by giving up per-pane transparency
+  // sorting; the wall still sorts correctly against the rest of the scene.
   const paneGeo = new THREE.PlaneGeometry(cellW - mullion, cellH - mullion);
-  const glassGroup = new THREE.Group();
+  const panes = [];
   for (let c = 0; c < cols; c++) {
     for (let r = 0; r < rows; r++) {
-      const pane = new THREE.Mesh(paneGeo, glassMaterial);
-      pane.position.set(
+      const g = paneGeo.clone();
+      g.translate(
         -width / 2 + cellW * (c + 0.5),
         -height / 2 + cellH * (r + 0.5),
         -depth * 0.18
       );
-      glassGroup.add(pane);
+      panes.push(g);
     }
   }
-  group.add(glassGroup);
+  paneGeo.dispose();
+
+  const glazing = new THREE.Mesh(BufferGeometryUtils.mergeGeometries(panes, false), glassMaterial);
+  glazing.name = 'glazing';
+  panes.forEach((g) => g.dispose());
+  group.add(glazing);
   return group;
 }
 
