@@ -22,7 +22,7 @@ import { createAcidRainBuilding } from './buildings/acidRainBuilding.js';
 import { createFarmTower } from './buildings/farmTower.js';
 import { createCameraTween } from './cameraTween.js';
 import { buildUI, showToast, setLoadingProgress, hideLoading } from './ui.js';
-import { scatterPositions, clearSightlines } from './utils.js';
+import { scatterPositions, clearSightlines, blocksSightline } from './utils.js';
 
 // Pulled back far enough to frame all four towers plus the road cross.
 const DEFAULT_CAM = new THREE.Vector3(47, 33, 52);
@@ -104,8 +104,9 @@ async function boot() {
   };
 
   const exclusions = [];
-  // Every camera pose the app can put the user in, as ground-plane segments —
-  // the planting pass keeps trees from growing inside them.
+  // Every camera pose the app composes, as ground-plane segments — the
+  // planting pass keeps trees from growing inside them. `focus` marks the
+  // deliberate one-building shots, where an obstruction is most glaring.
   const sightlines = [];
   for (const [key, entry] of Object.entries(registry)) {
     entry.api.group.position.copy(entry.centre);
@@ -124,8 +125,8 @@ async function boot() {
 
     const pose = focusPose(entry, entry.api.approxHeight || 10);
     const to = [entry.centre.x, entry.centre.z];
-    sightlines.push({ from: [DEFAULT_CAM.x, DEFAULT_CAM.z], to });
-    sightlines.push({ from: [pose.position.x, pose.position.z], to });
+    sightlines.push({ from: [DEFAULT_CAM.x, DEFAULT_CAM.z], to, focus: false });
+    sightlines.push({ from: [pose.position.x, pose.position.z], to, focus: true });
   }
   await yieldToBrowser();
 
@@ -460,6 +461,7 @@ function addSceneProps(scene, exclusions, sightlines, terrain, sky, quality) {
     [QUAD - 0.5, -QUAD],
   ];
   const corridor = ROAD_HALF_WIDTH + WALK_WIDTH + 1.2;
+  const focusLines = sightlines.filter((l) => l.focus);
 
   // Somewhere a tree can actually stand: on the plot, off the carriageway, out
   // of the pond and clear of the building footprints.
@@ -492,7 +494,14 @@ function addSceneProps(scene, exclusions, sightlines, terrain, sky, quality) {
   for (let i = 0; i < 10; i++) {
     const along = 7 + i * 2.9;
     if (along > PLOT_HALF - 2) break;
-    treeSpots.push([corridor + 1.1, along], [-corridor - 1.1, -along]);
+    // This row is pinned between the footway and the plot, so one that lands
+    // in a sightline is left out rather than nudged — a gap in a street row
+    // reads as ordinary, a tree standing in the road does not. Only the focus
+    // shots earn that: the overview looks straight down these roads, and
+    // thinning the rows to clear it would cost the avenue for nothing.
+    [[corridor + 1.1, along], [-corridor - 1.1, -along]].forEach((p) => {
+      if (!blocksSightline(p, focusLines, 3.8)) treeSpots.push(p);
+    });
   }
   scene.add(createForest(treeSpots, quality));
 

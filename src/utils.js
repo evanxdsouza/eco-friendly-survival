@@ -86,6 +86,31 @@ export function tagBuilding(object, key) {
  * the plot, say) — when the near side of the corridor fails it, the point is
  * sent round the far side instead rather than dropped.
  */
+/**
+ * Perpendicular distance from a point to the stretch of a corridor that is
+ * actually in shot, plus the point on the centre line it measures from.
+ * Returns null when the point is beside the camera or behind the subject.
+ */
+function corridorOffset([x, z], { from, to }) {
+  const vx = to[0] - from[0];
+  const vz = to[1] - from[1];
+  const len2 = vx * vx + vz * vz;
+  if (len2 < 1e-6) return null;
+  const t = ((x - from[0]) * vx + (z - from[1]) * vz) / len2;
+  if (t <= 0.02 || t >= 0.98) return null;
+  const cx = from[0] + vx * t;
+  const cz = from[1] + vz * t;
+  return { d: Math.hypot(x - cx, z - cz), cx, cz, vx, vz };
+}
+
+/** True if a point sits inside any of the corridors. */
+export function blocksSightline(point, lines, clearance) {
+  return lines.some((line) => {
+    const hit = corridorOffset(point, line);
+    return hit !== null && hit.d < clearance;
+  });
+}
+
 export function clearSightlines(points, lines, clearance, inBounds = () => true) {
   return points.map((p) => {
     let [x, z] = p;
@@ -93,21 +118,13 @@ export function clearSightlines(points, lines, clearance, inBounds = () => true)
     // relax a few times; positions settle well before the cap in practice.
     for (let pass = 0; pass < 4; pass++) {
       let moved = false;
-      for (const { from, to } of lines) {
-        const vx = to[0] - from[0];
-        const vz = to[1] - from[1];
-        const len2 = vx * vx + vz * vz;
-        if (len2 < 1e-6) continue;
-        const t = ((x - from[0]) * vx + (z - from[1]) * vz) / len2;
-        // only the stretch that is actually in shot: not beside the camera,
-        // not behind the subject
-        if (t <= 0.02 || t >= 0.98) continue;
-        const cx = from[0] + vx * t;
-        const cz = from[1] + vz * t;
+      for (const line of lines) {
+        const hit = corridorOffset([x, z], line);
+        if (hit === null || hit.d >= clearance) continue;
+        const { cx, cz, vx, vz } = hit;
+        let { d } = hit;
         let dx = x - cx;
         let dz = z - cz;
-        let d = Math.hypot(dx, dz);
-        if (d >= clearance) continue;
         if (d < 1e-3) {
           // dead centre — step off along the corridor normal
           d = Math.hypot(vx, vz);
