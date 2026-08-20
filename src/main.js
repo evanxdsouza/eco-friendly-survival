@@ -87,7 +87,20 @@ async function boot() {
     earthquake: { api: createEarthquakeBuilding(), centre: new THREE.Vector3(QUAD + 0.5, 0, QUAD - 0.5) },
     flood: { api: createFloodBuilding({ water: terrain.water }), centre: new THREE.Vector3(-QUAD - 0.4, 0, QUAD - 1.2) },
     acidRain: { api: createAcidRainBuilding(), centre: new THREE.Vector3(-QUAD - 0.5, 0, -QUAD - 0.5) },
-    farm: { api: createFarmTower(), centre: new THREE.Vector3(QUAD - 0.5, 0, -QUAD) },
+    farm: {
+      api: createFarmTower(),
+      centre: new THREE.Vector3(QUAD - 0.5, 0, -QUAD),
+      // The planter ledges, crops and drip lines are all on the tower's +Z
+      // face. Viewing outward from the site centre would put the camera on
+      // -Z — the blank back elevation. Come at it from +Z instead.
+      //
+      // Swung round to -X, not +X: a straight-on +Z approach puts the
+      // earthquake building (11.5, 10.5, r 6.4) almost exactly on the
+      // sightline, and swinging +X passes within ~1 unit of its footprint.
+      // -0.42 clears it by ~2.9 units and still reads as a three-quarter
+      // view rather than a flat elevation.
+      viewDir: new THREE.Vector3(-0.42, 0, 1),
+    },
   };
 
   const exclusions = [];
@@ -142,7 +155,12 @@ async function boot() {
     ui.setActiveBuilding(key);
 
     const h = entry.api.approxHeight || 10;
-    const dir = new THREE.Vector3(entry.centre.x, 0, entry.centre.z);
+    // Default: view from outside the plot, looking back at the site centre.
+    // A building with a clear "front" overrides this with its own viewDir,
+    // otherwise the fly-to can land on a blank elevation.
+    const dir = entry.viewDir
+      ? entry.viewDir.clone()
+      : new THREE.Vector3(entry.centre.x, 0, entry.centre.z);
     if (dir.lengthSq() < 1e-4) dir.set(1, 0, 1);
     dir.normalize();
 
