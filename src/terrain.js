@@ -419,14 +419,25 @@ function createWater(scene, sunLight, quality) {
     //     and the second one was immediately thrown away, because the override
     //     material had replaced every surface with its normals. Skip it.
     //
-    //  2. Refresh the reflection on alternate frames. The surface ripples at
-    //     0.55 time-scale and is distorted by the normal map, so a reflection
-    //     one frame out of date is indistinguishable from a fresh one.
+    //  2. Refresh the reflection on alternate frames, but ONLY while the
+    //     mirror plane is stationary. Ripples are fine to hold for a frame —
+    //     they are slow and normal-map distorted — but the reflection is
+    //     computed from the plane's position, so a stale one is wrong the
+    //     moment the plane moves. The flood raises and spreads the surface
+    //     every frame, and reflecting last frame's water height makes the
+    //     reflected image strobe. Track the transform and go frame-by-frame
+    //     whenever it changes; that is only during a flood, so the idle case
+    //     keeps the saving.
     const renderReflection = mesh.onBeforeRender;
     let reflectTick = 0;
+    let reflectedY = null;
+    let reflectedSpread = null;
     mesh.onBeforeRender = function (renderer, renderScene, camera, ...rest) {
       if (renderScene.overrideMaterial) return;
-      if (reflectTick++ % 2 !== 0) return;
+      const moving = mesh.position.y !== reflectedY || mesh.scale.x !== reflectedSpread;
+      if (!moving && reflectTick++ % 2 !== 0) return;
+      reflectedY = mesh.position.y;
+      reflectedSpread = mesh.scale.x;
       renderReflection.call(this, renderer, renderScene, camera, ...rest);
     };
   }
