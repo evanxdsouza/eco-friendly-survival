@@ -22,7 +22,7 @@ import { createAcidRainBuilding } from './buildings/acidRainBuilding.js';
 import { createFarmTower } from './buildings/farmTower.js';
 import { createCameraTween } from './cameraTween.js';
 import { buildUI, showToast, setLoadingProgress, hideLoading } from './ui.js';
-import { scatterPositions } from './utils.js';
+import { scatterPositions, clearSightlines, blocksSightline } from './utils.js';
 
 // Pulled back far enough to frame all four towers plus the road cross.
 const DEFAULT_CAM = new THREE.Vector3(47, 33, 52);
@@ -104,6 +104,10 @@ async function boot() {
   };
 
   const exclusions = [];
+  // Every camera pose the app composes, as ground-plane segments — the
+  // planting pass keeps trees from growing inside them. `focus` marks the
+  // deliberate one-building shots, where an obstruction is most glaring.
+  const sightlines = [];
   for (const [key, entry] of Object.entries(registry)) {
     entry.api.group.position.copy(entry.centre);
     entry.api.group.userData.buildingKey = key;
@@ -118,13 +122,18 @@ async function boot() {
     });
     scene.add(entry.api.group);
     exclusions.push({ x: entry.centre.x, z: entry.centre.z, r: entry.api.footprint.r + 0.6 });
+
+    const pose = focusPose(entry, entry.api.approxHeight || 10);
+    const to = [entry.centre.x, entry.centre.z];
+    sightlines.push({ from: [DEFAULT_CAM.x, DEFAULT_CAM.z], to, focus: false });
+    sightlines.push({ from: [pose.position.x, pose.position.z], to, focus: true });
   }
   await yieldToBrowser();
 
   // ---- 6. vegetation and street furniture ------------------------------
   setLoadingProgress('Planting trees and street furniture…', 0.8);
   await yieldToBrowser();
-  addSceneProps(scene, exclusions, terrain, sky, quality);
+  addSceneProps(scene, exclusions, sightlines, terrain, sky, quality);
   await yieldToBrowser();
 
   // ---- 7. signage + post-processing ------------------------------------
@@ -154,28 +163,8 @@ async function boot() {
     refreshLabels();
     ui.setActiveBuilding(key);
 
-    const h = entry.api.approxHeight || 10;
-    // Default: view from outside the plot, looking back at the site centre.
-    // A building with a clear "front" overrides this with its own viewDir,
-    // otherwise the fly-to can land on a blank elevation.
-    const dir = entry.viewDir
-      ? entry.viewDir.clone()
-      : new THREE.Vector3(entry.centre.x, 0, entry.centre.z);
-    if (dir.lengthSq() < 1e-4) dir.set(1, 0, 1);
-    dir.normalize();
-
-    // Frame the whole building with a little headroom, from slightly above
-    // mid-height — a natural architectural viewpoint.
-    const dist = 11 + h * 1.05;
-    tween.flyTo(
-      new THREE.Vector3(
-        entry.centre.x + dir.x * dist,
-        h * 0.62 + 3.5,
-        entry.centre.z + dir.z * dist
-      ),
-      new THREE.Vector3(entry.centre.x, h * 0.45, entry.centre.z),
-      1.7
-    );
+    const pose = focusPose(entry, entry.api.approxHeight || 10);
+    tween.flyTo(pose.position, pose.target, 1.7);
   }
 
   function triggerBuilding(key) {
@@ -429,10 +418,38 @@ async function boot() {
 }
 
 /**
+ * Camera pose that frames one building: pulled back from slightly above
+ * mid-height — a natural architectural viewpoint. Shared by the focus tween
+ * and by the planting pass, so the two cannot drift apart and plant a tree in
+ * the middle of the shot.
+ */
+function focusPose(entry, height) {
+  const centre = entry.centre;
+  // Default: view from outside the plot, looking back at the site centre.
+  // A building with a clear "front" overrides this with its own viewDir,
+  // otherwise the fly-to can land on a blank elevation.
+  const dir = entry.viewDir
+    ? entry.viewDir.clone()
+    : new THREE.Vector3(centre.x, 0, centre.z);
+  if (dir.lengthSq() < 1e-4) dir.set(1, 0, 1);
+  dir.normalize();
+
+  const dist = 11 + height * 1.05;
+  return {
+    position: new THREE.Vector3(
+      centre.x + dir.x * dist,
+      height * 0.62 + 3.5,
+      centre.z + dir.z * dist
+    ),
+    target: new THREE.Vector3(centre.x, height * 0.45, centre.z),
+  };
+}
+
+/**
  * Trees, grass, hedges, lamps, benches, bins, cars, fences and bollards.
  * Placement is deterministic so the composition is stable between reloads.
  */
-function addSceneProps(scene, exclusions, terrain, sky, quality) {
+function addSceneProps(scene, exclusions, sightlines, terrain, sky, quality) {
   const rng = mulberry32(20260817);
 
   // --- trees, clustered in each quadrant ---------------------------------
@@ -444,23 +461,47 @@ function addSceneProps(scene, exclusions, terrain, sky, quality) {
     [QUAD - 0.5, -QUAD],
   ];
   const corridor = ROAD_HALF_WIDTH + WALK_WIDTH + 1.2;
+  const focusLines = sightlines.filter((l) => l.focus);
+
+  // Somewhere a tree can actually stand: on the plot, off the carriageway, out
+  // of the pond and clear of the building footprints.
+  const plantable = ([x, z]) =>
+    Math.abs(x) > corridor &&
+    Math.abs(z) > corridor &&
+    Math.abs(x) <= PLOT_HALF - 1 &&
+    Math.abs(z) <= PLOT_HALF - 1 &&
+    terrain.pondField(x, z) <= -0.15 &&
+    !exclusions.some((e) => Math.hypot(x - e.x, z - e.z) < e.r);
 
   quadrants.forEach(([cx, cz]) => {
-    const pts = scatterPositions(cx, cz, 9, 6.8, 9.6, exclusions, rng);
-    pts.forEach((p) => {
-      // keep clear of the carriageway and out of the pond
-      if (Math.abs(p[0]) < corridor || Math.abs(p[1]) < corridor) return;
-      if (terrain.pondField(p[0], p[1]) > -0.15) return;
-      if (Math.abs(p[0]) > PLOT_HALF - 1 || Math.abs(p[1]) > PLOT_HALF - 1) return;
-      treeSpots.push(p);
-    });
+    // Filter first, then nudge: a spot the scatter already rejected must stay
+    // rejected, or clearing a sightline quietly revives it as a duplicate.
+    // 11 candidates, not 9: a nudge can push a tree off the plot, and the
+    // spares keep the quadrants as leafy as they were before.
+    const scattered = scatterPositions(cx, cz, 11, 6.8, 9.6, exclusions, rng).filter(plantable);
+    // Slide anything growing in front of a building aside. 3.8 clears the
+    // widest canopy (base radius ~2.6 at the largest instance scale).
+    clearSightlines(scattered, sightlines, 3.8, plantable)
+      .filter(plantable)
+      // Two spots nudged off the same sightline can land on top of each other;
+      // a minimum spacing keeps them reading as separate trees.
+      .forEach((p) => {
+        if (treeSpots.every((q) => Math.hypot(p[0] - q[0], p[1] - q[1]) >= 2.0)) treeSpots.push(p);
+      });
   });
 
   // a loose line of street trees just behind the footway
   for (let i = 0; i < 10; i++) {
     const along = 7 + i * 2.9;
     if (along > PLOT_HALF - 2) break;
-    treeSpots.push([corridor + 1.1, along], [-corridor - 1.1, -along]);
+    // This row is pinned between the footway and the plot, so one that lands
+    // in a sightline is left out rather than nudged — a gap in a street row
+    // reads as ordinary, a tree standing in the road does not. Only the focus
+    // shots earn that: the overview looks straight down these roads, and
+    // thinning the rows to clear it would cost the avenue for nothing.
+    [[corridor + 1.1, along], [-corridor - 1.1, -along]].forEach((p) => {
+      if (!blocksSightline(p, focusLines, 3.8)) treeSpots.push(p);
+    });
   }
   scene.add(createForest(treeSpots, quality));
 

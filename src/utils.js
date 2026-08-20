@@ -74,3 +74,74 @@ export function tagBuilding(object, key) {
   object.userData.buildingKey = key;
   return object;
 }
+
+/**
+ * Slides scattered points out of the corridor between a camera and the thing
+ * it is pointed at. A tree that grows dead in front of a building hides the
+ * one thing the user asked to look at, and the scatter is random enough that
+ * this happens on some seeds. `lines` are { from: [x, z], to: [x, z] } pairs
+ * in ground space; points already clear of every corridor are untouched.
+ *
+ * `inBounds` keeps a nudge from shoving a point somewhere it cannot live (off
+ * the plot, say) — when the near side of the corridor fails it, the point is
+ * sent round the far side instead rather than dropped.
+ */
+/**
+ * Perpendicular distance from a point to the stretch of a corridor that is
+ * actually in shot, plus the point on the centre line it measures from.
+ * Returns null when the point is beside the camera or behind the subject.
+ */
+function corridorOffset([x, z], { from, to }) {
+  const vx = to[0] - from[0];
+  const vz = to[1] - from[1];
+  const len2 = vx * vx + vz * vz;
+  if (len2 < 1e-6) return null;
+  const t = ((x - from[0]) * vx + (z - from[1]) * vz) / len2;
+  if (t <= 0.02 || t >= 0.98) return null;
+  const cx = from[0] + vx * t;
+  const cz = from[1] + vz * t;
+  return { d: Math.hypot(x - cx, z - cz), cx, cz, vx, vz };
+}
+
+/** True if a point sits inside any of the corridors. */
+export function blocksSightline(point, lines, clearance) {
+  return lines.some((line) => {
+    const hit = corridorOffset(point, line);
+    return hit !== null && hit.d < clearance;
+  });
+}
+
+export function clearSightlines(points, lines, clearance, inBounds = () => true) {
+  return points.map((p) => {
+    let [x, z] = p;
+    // A push away from one corridor can slide the point into another, so
+    // relax a few times; positions settle well before the cap in practice.
+    for (let pass = 0; pass < 4; pass++) {
+      let moved = false;
+      for (const line of lines) {
+        const hit = corridorOffset([x, z], line);
+        if (hit === null || hit.d >= clearance) continue;
+        const { cx, cz, vx, vz } = hit;
+        let { d } = hit;
+        let dx = x - cx;
+        let dz = z - cz;
+        if (d < 1e-3) {
+          // dead centre — step off along the corridor normal
+          d = Math.hypot(vx, vz);
+          dx = -vz / d;
+          dz = vx / d;
+        } else {
+          dx /= d;
+          dz /= d;
+        }
+        const near = [cx + dx * clearance, cz + dz * clearance];
+        const far = [cx - dx * clearance, cz - dz * clearance];
+        const pick = inBounds(near) || !inBounds(far) ? near : far;
+        [x, z] = pick;
+        moved = true;
+      }
+      if (!moved) break;
+    }
+    return [x, z];
+  });
+}
