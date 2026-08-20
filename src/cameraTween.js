@@ -36,5 +36,12 @@ export function createCameraTween(camera, controls) {
     return !!tween;
   }
 
-  return { flyTo, update, isActive };
+  /** Aborts an in-flight tween, leaving the camera where it is. */
+  function cancel() {
+    if (!tween) return;
+    tween = null;
+    controls.enabled = true;
+  }
+
+  return { flyTo, update, isActive, cancel };
 }

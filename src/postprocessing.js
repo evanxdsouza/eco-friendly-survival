@@ -84,7 +84,10 @@ export function createComposer(renderer, scene, camera, quality = 'high') {
 
   // A multisampled target keeps geometry edges clean; post-processing would
   // otherwise throw away the renderer's own MSAA.
-  const samples = quality === 'high' ? 4 : quality === 'medium' ? 2 : 0;
+  // 2x rather than 4x at high: SMAA already runs on the final LDR image, so
+  // 4x MSAA on a half-float target was buying a second pass at edge cleanup
+  // for a large amount of bandwidth at devicePixelRatio 2.
+  const samples = quality === 'high' ? 2 : quality === 'medium' ? 2 : 0;
   const target = new THREE.WebGLRenderTarget(size.x, size.y, {
     type: THREE.HalfFloatType,
     samples,
@@ -131,7 +134,7 @@ export function createComposer(renderer, scene, camera, quality = 'high') {
     passes: { gtao, bloom, grade, smaa },
 
     render(dt) {
-      grade.uniforms.uTime.value += dt;
+      if (globalThis.__eco?.frozen === undefined) grade.uniforms.uTime.value += dt;
       composer.render();
     },
 

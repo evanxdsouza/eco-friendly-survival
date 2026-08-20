@@ -298,8 +298,13 @@ export function emissive(color, intensity = 2) {
 export function applyEnvironment(envMap) {
   const touch = (m) => {
     if (m && 'envMap' in m) {
+      // Only the FIRST assignment changes the shader program. Swapping the
+      // texture afterwards is a uniform update. Re-flagging needsUpdate on
+      // every time-of-day step forced a full recompile of every material in
+      // the scene, which is what made dragging that slider stall.
+      const firstAssignment = !m.envMap;
       m.envMap = envMap;
-      m.needsUpdate = true;
+      if (firstAssignment) m.needsUpdate = true;
     }
   };
   if (M) Object.values(M).forEach(touch);

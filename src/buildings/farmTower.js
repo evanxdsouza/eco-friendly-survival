@@ -466,6 +466,8 @@ export function createFarmTower() {
     interact: triggerGrowth,
     triggerGrowth,
     getGrowth: () => growth.value,
+    /** True while the time-lapse is animating, so shadows can keep pace. */
+    isGrowing: () => growth.animating,
     update,
     setLabelVisible: (v) => setLabelVisible(label, v),
   };

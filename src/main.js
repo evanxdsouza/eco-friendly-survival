@@ -96,7 +96,10 @@ async function boot() {
     entry.api.group.userData.buildingKey = key;
     entry.api.group.traverse((o) => {
       if (o.isMesh || o.isInstancedMesh) {
-        o.castShadow = true;
+        // Glazing is excluded from the shadow pass. Three renders transparent
+        // casters as fully opaque blockers, so every window was stamping a
+        // solid black rectangle into the shadow map — both wrong and costly.
+        o.castShadow = o.name !== 'glazing';
         o.receiveShadow = true;
       }
     });
@@ -197,12 +200,22 @@ async function boot() {
   });
   ui.setQualityActive(quality);
 
-  // street lamps react to the time-of-day slider
-  sky.onChange((state) => {
-    scene.traverse((o) => {
-      if (o.userData.setNight) o.userData.setNight(state.nightFactor);
-    });
+  // Street lamps react to the time-of-day slider. Collected once rather than
+  // re-traversing the whole scene on every change.
+  const nightResponders = [];
+  scene.traverse((o) => {
+    if (o.userData.setNight) nightResponders.push(o);
   });
+  const applyNight = (nightFactor) => {
+    for (const o of nightResponders) o.userData.setNight(nightFactor);
+  };
+  sky.onChange((state) => applyNight(state.nightFactor));
+
+  // sky.setTimeOfDay() already ran during boot — before the lamps existed and
+  // before the listener above was registered — so apply the current state once
+  // now. Without this the lamps stay in their construction state until the
+  // slider is first dragged.
+  applyNight(sky.state.nightFactor);
 
   // ---- raycasting -------------------------------------------------------
   const raycaster = new THREE.Raycaster();
@@ -222,11 +235,25 @@ async function boot() {
   }
 
   let pointerDownAt = 0;
+
+  // Picking is deferred to the frame loop. Raycasting recursively through four
+  // building trees on every pointermove event ran the pick many times per
+  // frame while orbiting; once per frame is all that can possibly be seen.
+  let pendingPointer = null;
   renderer.domElement.addEventListener('pointermove', (e) => {
-    hoveredKey = pick(e);
+    pendingPointer = e;
+  });
+
+  function updateHover() {
+    if (!pendingPointer) return;
+    const e = pendingPointer;
+    pendingPointer = null;
+    const next = pick(e);
+    if (next === hoveredKey) return;
+    hoveredKey = next;
     renderer.domElement.style.cursor = hoveredKey ? 'pointer' : 'grab';
     refreshLabels();
-  });
+  }
   renderer.domElement.addEventListener('pointerdown', () => {
     pointerDownAt = performance.now();
   });
@@ -240,14 +267,22 @@ async function boot() {
   });
 
   // ---- resize -----------------------------------------------------------
+  // Debounced: post.setSize reallocates the composer target, GTAO's three
+  // targets, all ten bloom mips and SMAA's targets. Dragging a window edge
+  // would otherwise churn dozens of GPU render targets per second.
+  let resizeTimer = 0;
   window.addEventListener('resize', () => {
-    const w = window.innerWidth;
-    const h = window.innerHeight;
-    camera.aspect = w / h;
-    camera.updateProjectionMatrix();
-    renderer.setSize(w, h);
-    labelRenderer.setSize(w, h);
-    post.setSize(w, h);
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+      labelRenderer.setSize(w, h);
+      post.setSize(w, h);
+      shadows.invalidate();
+    }, 150);
   });
 
   // =======================================================================
@@ -255,6 +290,41 @@ async function boot() {
   // =======================================================================
   const timer = new THREE.Timer();
   const shakeOffset = new THREE.Vector3();
+  const entries = Object.values(registry);
+
+  // ---- shadow scheduling -------------------------------------------------
+  // The sun's shadow map is a full scene render into a 4096² depth buffer. The
+  // shadow camera is fixed at the origin, so orbiting the camera cannot change
+  // a single texel of it — only moving geometry or a moving sun can. Rather
+  // than redrawing it 60 times a second for a site that is usually standing
+  // still, redraw it when something actually changed, and otherwise at a low
+  // idle rate so wind-driven foliage still creeps along.
+  const shadows = (() => {
+    renderer.shadowMap.autoUpdate = false;
+    renderer.shadowMap.needsUpdate = true;
+    let dirty = true;
+    let idle = 0;
+    const IDLE_INTERVAL = 4; // frames between refreshes when nothing is moving
+    return {
+      invalidate() {
+        dirty = true;
+      },
+      /** Decides whether this frame re-renders the shadow map. */
+      tick(active) {
+        if (dirty || active) {
+          renderer.shadowMap.needsUpdate = true;
+          dirty = false;
+          idle = 0;
+          return;
+        }
+        if (++idle >= IDLE_INTERVAL) {
+          renderer.shadowMap.needsUpdate = true;
+          idle = 0;
+        }
+      },
+    };
+  })();
+  sky.onChange(() => shadows.invalidate());
 
   function animate() {
     requestAnimationFrame(animate);
@@ -262,15 +332,25 @@ async function boot() {
     const dt = Math.min(timer.getDelta(), 0.05);
     const elapsed = timer.getElapsed();
 
-    windUniforms.uTime.value = elapsed;
+    if (window.__eco?.frozen === undefined) windUniforms.uTime.value = elapsed;
 
     tween.update(dt);
     if (!tween.isActive()) controls.update();
 
-    for (const entry of Object.values(registry)) {
+    updateHover();
+
+    for (const entry of entries) {
       entry.api.update(dt, elapsed);
     }
     terrain.water.update(dt);
+
+    // A simulation moving real geometry means the shadow map has to keep up.
+    shadows.tick(
+      registry.earthquake.api.getShakeIntensity() > 0.001 ||
+        registry.flood.api.isAuto() ||
+        registry.acidRain.api.isRaining() ||
+        registry.farm.api.isGrowing?.()
+    );
 
     // keep the flood slider in step with the automatic flood cycle
     ui.syncFloodSlider(registry.flood.api.getFloodLevel());
@@ -290,6 +370,40 @@ async function boot() {
     post.render(dt);
     labelRenderer.render(scene, camera);
   }
+
+  // Test/measurement hook. Lets the Playwright perf harness drive the scene
+  // deterministically: pin the clock, place the camera exactly, and read back
+  // renderer statistics. Costs nothing at runtime.
+  window.__eco = {
+    THREE, scene, camera, renderer, controls, sky, registry, post, terrain, timer,
+    /** Freezes every animated uniform so two builds can be pixel-compared. */
+    freeze(t = 12) {
+      window.__eco.frozen = t;
+      windUniforms.uTime.value = t;
+      post.passes.grade.uniforms.uTime.value = t;
+    },
+    /** Places the camera on a fixed transform, bypassing the tween. */
+    setView(pos, target) {
+      tween.cancel?.();
+      camera.position.set(pos[0], pos[1], pos[2]);
+      controls.target.set(target[0], target[1], target[2]);
+      controls.update();
+      camera.updateMatrixWorld();
+    },
+    focusBuilding,
+    triggerBuilding,
+    setTimeOfDay: (h) => sky.setTimeOfDay(h),
+    /**
+     * Renders one frame and reads the canvas back in the same task, while the
+     * drawing buffer is still intact (the context is not preserveDrawingBuffer).
+     * Used for before/after pixel comparison.
+     */
+    snapshot() {
+      renderer.shadowMap.needsUpdate = true;
+      post.render(0);
+      return renderer.domElement.toDataURL('image/png');
+    },
+  };
 
   setLoadingProgress('Ready', 1);
   hideLoading();

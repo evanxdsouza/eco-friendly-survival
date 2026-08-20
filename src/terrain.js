@@ -409,6 +409,26 @@ function createWater(scene, sunLight, quality) {
       alpha: 0.94,
     });
     isReal = true;
+
+    // The reflection re-renders the WHOLE scene into a 1024² target from the
+    // mirrored camera. Two guards, neither of them visible:
+    //
+    //  1. GTAOPass runs a normals prepass via scene.overrideMaterial and calls
+    //     renderer.render(scene, camera) again. That fires onBeforeRender a
+    //     second time, so the reflection was being rendered twice per frame —
+    //     and the second one was immediately thrown away, because the override
+    //     material had replaced every surface with its normals. Skip it.
+    //
+    //  2. Refresh the reflection on alternate frames. The surface ripples at
+    //     0.55 time-scale and is distorted by the normal map, so a reflection
+    //     one frame out of date is indistinguishable from a fresh one.
+    const renderReflection = mesh.onBeforeRender;
+    let reflectTick = 0;
+    mesh.onBeforeRender = function (renderer, renderScene, camera, ...rest) {
+      if (renderScene.overrideMaterial) return;
+      if (reflectTick++ % 2 !== 0) return;
+      renderReflection.call(this, renderer, renderScene, camera, ...rest);
+    };
   }
 
   mesh.position.set(POND.cx, -0.25, POND.cz);
